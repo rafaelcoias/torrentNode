@@ -7,9 +7,11 @@ public class NodeServer {
     // Atributos
     private int port;
     private ServerSocket serverSocket;
+    private String fileDirectory;
 
-    public NodeServer(int port) {
+    public NodeServer(int port, String fileDirectory) {
         this.port = port;
+        this.fileDirectory = fileDirectory;
     }
 
     // Métodos privados
@@ -19,11 +21,11 @@ public class NodeServer {
             try {
                 Socket clientSocket = serverSocket.accept();
                 System.out.println("Novo nó conectado: " + clientSocket.getRemoteSocketAddress());
-                
-                // Nova thread que representa o cliente conectado
-                new Thread(new ClientHandler(clientSocket)).start();
+
+                // Passa o diretório ao ClientHandler
+                new Thread(new ClientHandler(clientSocket, fileDirectory)).start();
             } catch (IOException e) {
-                if (!serverSocket.isClosed()) 
+                if (!serverSocket.isClosed())
                     System.err.println("Erro ao aceitar conexão: " + e.getMessage());
             }
         }
@@ -32,7 +34,6 @@ public class NodeServer {
     private void acceptConnections() {
         new Thread(this::connect).start();
     }
-
 
     // Métodos publicos
 
