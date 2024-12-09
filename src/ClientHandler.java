@@ -6,12 +6,15 @@ import java.util.List;
 public class ClientHandler implements Runnable {
     private Socket clientSocket;
     private String fileDirectory;
-    private List<String> connectedNodes = new ArrayList<>();
+    private IscTorrentNode node;
 
-    public ClientHandler(Socket clientSocket, String fileDirectory) {
+    public ClientHandler(Socket clientSocket, String fileDirectory, IscTorrentNode node) {
         this.clientSocket = clientSocket;
         this.fileDirectory = fileDirectory;
+        this.node = node;
     }
+
+    // Funções públicas
 
     @Override
     public void run() {
@@ -20,53 +23,50 @@ public class ClientHandler implements Runnable {
             out.flush();
             ObjectInputStream in = new ObjectInputStream(clientSocket.getInputStream());
 
-            System.out.println("Object streams criados para o cliente: " + clientSocket.getRemoteSocketAddress());
+            System.out.println("Object streams criados para o cliente: " + clientSocket.getLocalSocketAddress());
 
+            // Loop para lidar com mensagens do cliente, fica aberto até a conexão ser
+            // fechada
             while (true) {
                 Object message = in.readObject();
-                System.out.println("Mensagem recebida: " + message.getClass().getSimpleName());
 
+                // Se a mensagem for uma string e começar com "CONNECT", é um pedido de conexão
                 if (message instanceof String && ((String) message).startsWith("CONNECT")) {
                     String neighbor = ((String) message).split(" ")[1];
-                    addNeighbor(neighbor);
+                    // Adiciona o vizinho à lista de vizinhos
                     System.out.println("Novo vizinho adicionado: " + neighbor);
+                    node.addNeighbor(neighbor);
                     out.writeObject("OK CONNECTED");
                     out.flush();
                     continue;
                 }
 
-                if (message instanceof UpdateNeighborsRequest) {
-                    UpdateNeighborsRequest updateRequest = (UpdateNeighborsRequest) message;
-                    List<String> newNeighbors = updateRequest.getNeighbors();
-                    System.out.println("UpdateNeighborsRequest recebido com vizinhos: " + newNeighbors);
-                
-                    for (String neighbor : newNeighbors) {
-                        addNeighbor(neighbor);
-                    }
-                    System.out.println("Lista de vizinhos após processamento do UpdateNeighborsRequest: " + connectedNodes);
-                    continue;
-                }
-                            
-
+                // Se a mensagem for uma instância de SearchRequest, é um pedido de pesquisa
                 if (message instanceof SearchRequest) {
                     handleSearchRequest((SearchRequest) message, out);
+                } else if (message instanceof FileRequest) {
+                    // Se a mensagem for uma instância de FileRequest, é um pedido de download
+                    handleFileRequest((FileRequest) message, out);
                 } else {
-                    System.err.println("Mensagem não reconhecida: " + message.getClass().getSimpleName());
+                    System.err.println("Mensagem inválida recebida: " + message);
                 }
             }
         } catch (IOException | ClassNotFoundException e) {
-            System.err.println("Erro de comunicação com o cliente: " + e.getMessage());
+            System.err.println("Erro de comunicação com o cliente.");
         } finally {
             try {
                 clientSocket.close();
-                System.out.println("Conexão fechada com o cliente: " + clientSocket.getRemoteSocketAddress());
+                System.out.println("Conexão fechada com o cliente: " + clientSocket.getLocalSocketAddress());
             } catch (IOException e) {
                 e.printStackTrace();
             }
         }
     }
 
+    // Funções privadas
+
     // Funções de pesquisa
+
     private void handleSearchRequest(SearchRequest request, ObjectOutputStream out) throws IOException {
         String searchTerm = request.getSearchTerm();
         System.out.println("Termo de pesquisa recebido: " + searchTerm);
@@ -89,74 +89,9 @@ public class ClientHandler implements Runnable {
         System.out.println("Resposta de pesquisa enviada: " + foundFiles);
     }
 
-    private List<String> searchInNeighbors(String searchTerm) {
-        System.out.println("Iniciando pesquisa nos vizinhos. Lista de vizinhos atual: " + connectedNodes);
-        List<String> allFiles = new ArrayList<>();
-    
-        for (String neighbor : connectedNodes) {
-            System.out.println("Tentando conectar ao vizinho: " + neighbor);
-            try {
-                String[] parts = neighbor.split(":");
-                String ip = parts[0];
-                int port = Integer.parseInt(parts[1]);
-    
-                try (Socket socket = new Socket(ip, port);
-                     ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
-                     ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
-    
-                    out.writeObject(new SearchRequest(searchTerm));
-                    out.flush();
-                    System.out.println("Pedido de pesquisa enviado para vizinho: " + neighbor);
-    
-                    Object response = in.readObject();
-                    if (response instanceof SearchResponse) {
-                        SearchResponse searchResponse = (SearchResponse) response;
-                        allFiles.addAll(searchResponse.getFileNames());
-                        System.out.println("Resposta recebida do vizinho " + neighbor + ": " + searchResponse.getFileNames());
-                    }
-                }
-            } catch (Exception e) {
-                System.err.println("Erro ao comunicar com o vizinho " + neighbor + ": " + e.getMessage());
-            }
-        }
-        return allFiles;
-    }
-    
-
-    public void addNeighbor(String ipPort) {
-        System.out.println("Tentando adicionar vizinho: " + ipPort);
-        if (!connectedNodes.contains(ipPort)) {
-            connectedNodes.add(ipPort);
-            System.out.println("Vizinho adicionado com sucesso: " + ipPort);
-            System.out.println("Lista de vizinhos atualizada: " + connectedNodes);
-    
-            // Propagar lista atualizada de vizinhos
-            for (String neighbor : connectedNodes) {
-                if (!neighbor.equals(ipPort)) {
-                    try (Socket socket = new Socket(neighbor.split(":")[0], Integer.parseInt(neighbor.split(":")[1]));
-                         ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream())) {
-    
-                        UpdateNeighborsRequest updateRequest = new UpdateNeighborsRequest(connectedNodes);
-                        out.writeObject(updateRequest);
-                        out.flush();
-                        System.out.println("UpdateNeighborsRequest enviado para: " + neighbor);
-                    } catch (IOException e) {
-                        System.err.println("Erro ao enviar UpdateNeighborsRequest para " + neighbor + ": " + e.getMessage());
-                    }
-                }
-            }
-        } else {
-            System.out.println("Vizinho já existe: " + ipPort);
-        }
-    }    
-
-    public List<String> getConnectedNodes() {
-        return new ArrayList<>(connectedNodes);
-    }
-
     private List<String> searchLocalFiles(String searchTerm) {
         List<String> filesFound = new ArrayList<>();
-        File directory = new File(fileDirectory); // Agora usa o diretório fornecido ao nó
+        File directory = new File(fileDirectory);
 
         if (!directory.exists() || !directory.isDirectory()) {
             System.err.println("Diretório não encontrado ou inválido: " + directory.getAbsolutePath());
@@ -166,9 +101,8 @@ public class ClientHandler implements Runnable {
         File[] allFiles = directory.listFiles();
         if (allFiles != null) {
             System.out.println("Ficheiros no diretório fornecido:");
-            for (File file : allFiles) {
+            for (File file : allFiles)
                 System.out.println(" - " + file.getName());
-            }
         } else {
             System.out.println("Nenhum ficheiro encontrado no diretório fornecido.");
         }
@@ -183,29 +117,83 @@ public class ClientHandler implements Runnable {
         return filesFound;
     }
 
+    private List<String> searchInNeighbors(String searchTerm) {
+        System.out.println("Iniciar a pesquisa nos vizinhos. Lista de vizinhos atual: " + node.getConnectedNodes());
+        List<String> allFiles = new ArrayList<>();
+
+        for (String neighbor : node.getConnectedNodes()) {
+            System.out.println("Tentar conectar ao vizinho: " + neighbor);
+            try {
+                String[] parts = neighbor.split(":");
+                String ip = parts[0];
+                int port = Integer.parseInt(parts[1]);
+
+                try (Socket socket = new Socket(ip, port);
+                        ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+                        ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
+
+                    out.writeObject(new SearchRequest(searchTerm));
+                    out.flush();
+                    System.out.println("Pedido de pesquisa enviado para vizinho: " + neighbor);
+
+                    Object response = in.readObject();
+                    if (response instanceof SearchResponse) {
+                        SearchResponse searchResponse = (SearchResponse) response;
+                        allFiles.addAll(searchResponse.getFileNames());
+                        System.out.println(
+                                "Resposta recebida do vizinho " + neighbor + ": " + searchResponse.getFileNames());
+                    }
+                }
+            } catch (Exception e) {
+                System.err.println("Erro ao comunicar com o vizinho " + neighbor + ": " + e.getMessage());
+            }
+        }
+        return allFiles;
+    }
+
     // Funções de download
+
     private void handleFileRequest(FileRequest request, ObjectOutputStream out) throws IOException {
         String fileName = request.getFileName();
         int dataIndex = request.getDataIndex();
-
-        File file = new File(fileName);
-        if (file.exists()) {
-            byte[] dataData = readData(file, dataIndex);
-            FileResponse response = new FileResponse(dataData, dataIndex);
+    
+        File file = new File(fileDirectory, fileName); // Usa o diretório base configurado para localizar o ficheiro
+        System.out.println("Caminho do ficheiro solicitado: " + file.getAbsolutePath());
+        if (file.exists() && file.isFile()) {
+            System.out.println("Pedido de bloco recebido para " + fileName + " (índice: " + dataIndex + ")");
+            byte[] fileData = readData(file, dataIndex);
+    
+            if (fileData.length == 0) {
+                System.out.println("Fim do ficheiro detectado no servidor para " + fileName);
+            }
+    
+            FileResponse response = new FileResponse(fileData, dataIndex);
             out.writeObject(response);
             out.flush();
+            System.out.println("Bloco enviado para " + fileName + " (índice: " + dataIndex + ")");
+        } else {
+            System.err.println("Ficheiro não encontrado ou inválido: " + file.getAbsolutePath());
+            throw new IOException("Ficheiro não encontrado ou inválido: " + file.getName());
         }
     }
-
+    
     private byte[] readData(File file, int dataIndex) throws IOException {
-        int dataSize = 10240;  // TODO: testar valores (10240)
+        int dataSize = 10240; // Tamanho padrão de bloco
         byte[] buffer = new byte[dataSize];
-
-        try (var fileInputStream = new java.io.FileInputStream(file)) {
-            fileInputStream.skip((long) dataIndex * dataSize);
+    
+        try (FileInputStream fileInputStream = new FileInputStream(file)) {
+            long skippedBytes = fileInputStream.skip((long) dataIndex * dataSize);
+            System.out.println("Bytes saltados: " + skippedBytes);
+    
             int bytesRead = fileInputStream.read(buffer);
-
-            // Caso o último bloco seja menor que o tamanho do buffer
+            System.out.println("Bytes lidos: " + bytesRead);
+    
+            if (bytesRead == -1) {
+                System.out.println("Fim do ficheiro atingido.");
+                return new byte[0];
+            }
+    
+            // Caso o último bloco seja menor que o tamanho padrão
             if (bytesRead < dataSize) {
                 byte[] lastData = new byte[bytesRead];
                 System.arraycopy(buffer, 0, lastData, 0, bytesRead);
@@ -214,4 +202,6 @@ public class ClientHandler implements Runnable {
         }
         return buffer;
     }
+    
+
 }

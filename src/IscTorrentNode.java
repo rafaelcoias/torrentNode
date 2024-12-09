@@ -24,7 +24,7 @@ public class IscTorrentNode {
         initializeInterface();
 
         // Inicializa o servidor deste nó
-        NodeServer server = new NodeServer(port, fileDirectory);
+        NodeServer server = new NodeServer(port, fileDirectory, this);
         server.startServer();
     }
 
@@ -82,9 +82,9 @@ public class IscTorrentNode {
                 String searchTerm = searchField.getText().trim();
                 if (searchTerm.isEmpty()) {
                     JOptionPane.showMessageDialog(frame, "Por favor, insira um termo de pesquisa válido.");
-                } else {
-                    searchFiles(searchTerm, searchResults);
+                    return;
                 }
+                searchFiles(searchTerm, searchResults);
             }
         });
 
@@ -99,17 +99,20 @@ public class IscTorrentNode {
             @Override
             public void actionPerformed(ActionEvent e) {
                 String selectedFile = searchResultsList.getSelectedValue();
-                if (selectedFile != null)
-                    downloadFile(selectedFile);
-                else
+                if (selectedFile == null) {
                     JOptionPane.showMessageDialog(frame, "Por favor, selecione um ficheiro para descarregar.");
+                    return;
+                }
+                downloadFile(selectedFile);
             }
         });
 
+        // Mostrar a interface gráfica após a configuração estar completa
         frame.setVisible(true);
     }
 
-    // Pesquisa de ficheiros em outro nó
+    // Nova thread para enviar o pedido de pesquisa e esperar pela resposta dos
+    // clientes
     private void searchFiles(String searchTerm, DefaultListModel<String> searchResults) {
         new Thread(() -> {
             try (Socket socket = new Socket(ipAddress, port);
@@ -144,13 +147,16 @@ public class IscTorrentNode {
         }).start();
     }
 
-        public synchronized void addNeighbor(String neighbor) {
+    public synchronized void addNeighbor(String neighbor) {
         if (!connectedNodes.contains(neighbor)) {
             connectedNodes.add(neighbor);
             System.out.println("Vizinho adicionado: " + neighbor);
             System.out.println("Lista de vizinhos atualizada: " + connectedNodes);
+        } else {
+            System.out.println("Vizinho já existe: " + neighbor);
         }
     }
+    
 
     // Método para obter a lista de vizinhos
     public synchronized List<String> getConnectedNodes() {
@@ -159,26 +165,42 @@ public class IscTorrentNode {
 
     // Conectar a um nó
     private void connectNode() {
-        String noInfo = JOptionPane.showInputDialog("Insira o endereço e a porta do nó (formato: IP:Porta):");
+        String noInfo = JOptionPane.showInputDialog("Insira o endereço e a porta do nó (formato IP:Porta)");
         if (noInfo != null && noInfo.contains(":")) {
             String[] parts = noInfo.split(":");
-            String ip = parts[0];
-            int port = Integer.parseInt(parts[1]);
-    
+            String newIp = parts[0];
+            int newPort = Integer.parseInt(parts[1]);
+
+            // Iniciar uma nova thread para conectar ao nó especificado
             new Thread(() -> {
-                try (Socket socket = new Socket(ip, port);
-                     ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
-                     ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
-    
-                    String myAddress = ipAddress + ":" + this.port;
-                    out.writeObject("CONNECT " + myAddress);
+                try (Socket socket = new Socket(newIp, newPort);
+                        ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+                        ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
+
+                    // Enviar pedido de conexão
+                    String newAddress = this.ipAddress + ":" + this.port;
+                    out.writeObject("CONNECT " + newAddress);
                     out.flush();
-                    System.out.println("Pedido de conexão enviado para " + ip + ":" + port);
-    
+                    System.out.println("Pedido de conexão enviado para " + newIp + ":" + newPort);
+
+                    // Receber a resposta do nó conectado
                     String response = (String) in.readObject();
                     System.out.println("Resposta do nó conectado: " + response);
-                    System.out.println("Lista de vizinhos após conectar-se ao nó " + ip + ":" + port + ": " + connectedNodes);
-    
+
+                    // Verificar se a conexão foi bem sucedida
+                    if (!response.contains("CONNECTED")) {
+                        System.err.println("Erro ao conectar ao nó: " + response);
+                        return;
+                    }
+
+                    // Adicionar o nó conectado à lista de vizinhos
+                    addNeighbor(newIp + ":" + newPort);
+
+                    // Mostrar pop-up de sucesso
+                    SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(null,
+                            "Conectado com sucesso ao nó " + newIp + ":" + newPort,
+                            "Conexão Estabelecida",
+                            JOptionPane.INFORMATION_MESSAGE));
                 } catch (IOException | ClassNotFoundException e) {
                     System.err.println("Erro ao conectar ao nó: " + e.getMessage());
                 }
@@ -186,42 +208,52 @@ public class IscTorrentNode {
         } else {
             JOptionPane.showMessageDialog(null, "Formato inválido. Use: IP:Porta");
         }
-    }    
+    }
 
     // Download de um ficheiro
     private void downloadFile(String fileName) {
         new Thread(() -> {
             int dataIndex = 0;
             boolean fileComplete = false;
-
+    
             try (FileOutputStream downloadedFile = new FileOutputStream(new File(fileDirectory, fileName))) {
                 while (!fileComplete) {
                     try (Socket socket = new Socket(ipAddress, port);
-                            ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
-                            ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
-
-                        // Envia pedido de bloco de ficheiro
+                         ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+                         ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
+    
                         FileRequest request = new FileRequest(fileName, dataIndex);
                         out.writeObject(request);
                         out.flush();
-
-                        // Recebe o bloco de dados
-                        FileResponse response = (FileResponse) in.readObject();
-                        byte[] fileData = response.getFileData();
-                        dataIndex = response.getDataIndex();
-
-                        downloadedFile.write(fileData);
-
-                        // Verifica se o bloco lido é menor do que o tamanho padrão, indicando o fim do
-                        // ficheiro
-                        fileComplete = fileData.length < 1024;
+    
+                        Object response = in.readObject();
+                        if (response instanceof FileResponse) {
+                            FileResponse fileResponse = (FileResponse) response;
+                            byte[] fileData = fileResponse.getFileData();
+    
+                            if (fileData.length == 0) {
+                                System.out.println("Fim do ficheiro detectado no cliente.");
+                                fileComplete = true;
+                                continue;
+                            }
+    
+                            downloadedFile.write(fileData);
+                            System.out.println("Bloco recebido para " + fileName + " (índice: " + dataIndex + "): " 
+                                    + new String(fileData).trim());
+                            dataIndex++;
+                        } else {
+                            throw new IOException("Resposta inesperada do servidor.");
+                        }
                     }
                 }
-                System.out.println("Download completo para o ficheiro: " + fileName);
-            } catch (IOException | ClassNotFoundException e) {
-                System.err.println("Erro no download: " + e.getMessage());
+                JOptionPane.showMessageDialog(null, "Ficheiro descarregado com sucesso: " + fileName);
+            } catch (Exception e) {
+                e.printStackTrace();
+                JOptionPane.showMessageDialog(null, "Erro ao descarregar o ficheiro: " + e.getMessage());
             }
         }).start();
     }
+    
+    
 
 }
