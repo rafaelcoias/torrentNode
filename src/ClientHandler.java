@@ -34,8 +34,8 @@ public class ClientHandler implements Runnable {
                 if (message instanceof String && ((String) message).startsWith("CONNECT")) {
                     String neighbor = ((String) message).split(" ")[1];
                     // Adiciona o vizinho à lista de vizinhos
-                    System.out.println("Novo vizinho adicionado: " + neighbor);
                     node.addNeighbor(neighbor);
+                    System.out.println("Novo vizinho adicionado: " + neighbor);
                     out.writeObject("OK CONNECTED");
                     out.flush();
                     continue;
@@ -52,11 +52,12 @@ public class ClientHandler implements Runnable {
                 }
             }
         } catch (IOException | ClassNotFoundException e) {
-            System.err.println("Erro de comunicação com o cliente.");
+            // System.err.println("Erro de comunicação com o cliente.");
         } finally {
             try {
                 clientSocket.close();
-                System.out.println("Conexão fechada com o cliente: " + clientSocket.getLocalSocketAddress());
+                System.out.println("Conexão fechada com o cliente");
+                System.out.println("===================================");
             } catch (IOException e) {
                 e.printStackTrace();
             }
@@ -76,7 +77,7 @@ public class ClientHandler implements Runnable {
         System.out.println("Ficheiros locais encontrados: " + foundFiles);
 
         // Propagar o pedido de pesquisa para os vizinhos
-        List<String> neighborFiles = searchInNeighbors(searchTerm);
+        List<String> neighborFiles = searchInNeighbors(request, request.getSenderNode());
         System.out.println("Ficheiros encontrados nos vizinhos: " + neighborFiles);
 
         // Combinar os resultados locais e os dos vizinhos
@@ -87,6 +88,7 @@ public class ClientHandler implements Runnable {
         out.writeObject(response);
         out.flush();
         System.out.println("Resposta de pesquisa enviada: " + foundFiles);
+
     }
 
     private List<String> searchLocalFiles(String searchTerm) {
@@ -117,12 +119,15 @@ public class ClientHandler implements Runnable {
         return filesFound;
     }
 
-    private List<String> searchInNeighbors(String searchTerm) {
+    private List<String> searchInNeighbors(SearchRequest request, String senderNode) {
         System.out.println("Iniciar a pesquisa nos vizinhos. Lista de vizinhos atual: " + node.getConnectedNodes());
         List<String> allFiles = new ArrayList<>();
 
         for (String neighbor : node.getConnectedNodes()) {
             System.out.println("Tentar conectar ao vizinho: " + neighbor);
+            if (neighbor.equals(senderNode)) {
+                continue;
+            }
             try {
                 String[] parts = neighbor.split(":");
                 String ip = parts[0];
@@ -132,7 +137,9 @@ public class ClientHandler implements Runnable {
                         ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
                         ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
 
-                    out.writeObject(new SearchRequest(searchTerm));
+                    // Forward the request with updated senderNode
+                    SearchRequest forwardedRequest = new SearchRequest(request.getSearchTerm(), node.getIpAddress() + ":" + node.getPort());
+                    out.writeObject(forwardedRequest);
                     out.flush();
                     System.out.println("Pedido de pesquisa enviado para vizinho: " + neighbor);
 
@@ -156,43 +163,83 @@ public class ClientHandler implements Runnable {
     private void handleFileRequest(FileRequest request, ObjectOutputStream out) throws IOException {
         String fileName = request.getFileName();
         int dataIndex = request.getDataIndex();
-    
-        File file = new File(fileDirectory, fileName); // Usa o diretório base configurado para localizar o ficheiro
-        System.out.println("Caminho do ficheiro solicitado: " + file.getAbsolutePath());
+        File file = new File(fileDirectory, fileName);
+
+        // Se o ficheiro existir localmente, processa normalmente
         if (file.exists() && file.isFile()) {
             System.out.println("Pedido de bloco recebido para " + fileName + " (índice: " + dataIndex + ")");
             byte[] fileData = readData(file, dataIndex);
-    
+
             if (fileData.length == 0) {
                 System.out.println("Fim do ficheiro detectado no servidor para " + fileName);
             }
-    
+
             FileResponse response = new FileResponse(fileData, dataIndex);
             out.writeObject(response);
             out.flush();
             System.out.println("Bloco enviado para " + fileName + " (índice: " + dataIndex + ")");
         } else {
-            System.err.println("Ficheiro não encontrado ou inválido: " + file.getAbsolutePath());
-            throw new IOException("Ficheiro não encontrado ou inválido: " + file.getName());
+            System.out.println("Ficheiro " + fileName + " não encontrado localmente. Encaminhando para vizinhos...");
+            forwardRequestToNeighbors(request, out);
         }
     }
-    
+
+    private void forwardRequestToNeighbors(FileRequest request, ObjectOutputStream clientOut) {
+        for (String neighbor : node.getConnectedNodes()) {
+            try {
+                String[] parts = neighbor.split(":");
+                String neighborIp = parts[0];
+                int neighborPort = Integer.parseInt(parts[1]);
+
+                try (Socket socket = new Socket(neighborIp, neighborPort);
+                        ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+                        ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
+
+                    // Enviar o pedido de ficheiro para o vizinho
+                    out.writeObject(request);
+                    out.flush();
+                    System.out.println("Pedido de bloco enviado para vizinho: " + neighbor);
+
+                    // Receber a resposta do vizinho
+                    Object response = in.readObject();
+                    if (response instanceof FileResponse) {
+                        clientOut.writeObject(response);
+                        clientOut.flush();
+                        System.out.println("Bloco recebido do vizinho " + neighbor + " e enviado ao cliente.");
+                        return;
+                    }
+                }
+            } catch (Exception e) {
+                System.err.println("Erro ao encaminhar pedido para vizinho " + neighbor + ": " + e.getMessage());
+            }
+        }
+
+        // Se nenhum vizinho tiver o ficheiro, informa o cliente
+        try {
+            clientOut.writeObject(new FileResponse(new byte[0], request.getDataIndex()));
+            clientOut.flush();
+            System.out.println("Ficheiro não encontrado em nenhum vizinho.");
+        } catch (IOException e) {
+            System.err.println("Erro ao informar cliente sobre falta do ficheiro: " + e.getMessage());
+        }
+    }
+
     private byte[] readData(File file, int dataIndex) throws IOException {
         int dataSize = 10240; // Tamanho padrão de bloco
         byte[] buffer = new byte[dataSize];
-    
+
         try (FileInputStream fileInputStream = new FileInputStream(file)) {
             long skippedBytes = fileInputStream.skip((long) dataIndex * dataSize);
             System.out.println("Bytes saltados: " + skippedBytes);
-    
+
             int bytesRead = fileInputStream.read(buffer);
             System.out.println("Bytes lidos: " + bytesRead);
-    
+
             if (bytesRead == -1) {
                 System.out.println("Fim do ficheiro atingido.");
                 return new byte[0];
             }
-    
+
             // Caso o último bloco seja menor que o tamanho padrão
             if (bytesRead < dataSize) {
                 byte[] lastData = new byte[bytesRead];
@@ -202,6 +249,5 @@ public class ClientHandler implements Runnable {
         }
         return buffer;
     }
-    
 
 }

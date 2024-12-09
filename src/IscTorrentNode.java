@@ -5,14 +5,21 @@ import java.awt.event.ActionListener;
 import java.io.*;
 import java.net.Socket;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.UUID;
 
 public class IscTorrentNode {
 
+    // Atributos
     private String ipAddress;
     private int port;
     private String fileDirectory;
     private List<String> connectedNodes;
+    private Set<String> processedRequests = new HashSet<>();
+
+    // Métodos publicos
 
     public IscTorrentNode(String ipAddress, int port, String fileDirectory) {
         this.ipAddress = ipAddress;
@@ -27,6 +34,32 @@ public class IscTorrentNode {
         NodeServer server = new NodeServer(port, fileDirectory, this);
         server.startServer();
     }
+
+    public synchronized void addNeighbor(String neighbor) {
+        if (!connectedNodes.contains(neighbor)) {
+            connectedNodes.add(neighbor);
+            System.out.println("Vizinho adicionado: " + neighbor);
+            System.out.println("Lista de vizinhos atualizada: " + connectedNodes);
+        } else {
+            System.out.println("Vizinho já existe: " + neighbor);
+        }
+    }
+
+    // Método para obter a lista de vizinhos
+    public synchronized List<String> getConnectedNodes() {
+        return new ArrayList<>(connectedNodes);
+    }
+    
+    public String getIpAddress() {
+        return this.ipAddress;
+    }
+    
+    public int getPort() {
+        return this.port;
+    }
+    
+
+    // Métodos privados
 
     private void initializeInterface() {
         // Configuração incial
@@ -113,14 +146,14 @@ public class IscTorrentNode {
 
     // Nova thread para enviar o pedido de pesquisa e esperar pela resposta dos
     // clientes
-    private void searchFiles(String searchTerm, DefaultListModel<String> searchResults) {
+    private void searchFiles(String searchTerm, DefaultListModel<String> searchResults) {        
         new Thread(() -> {
             try (Socket socket = new Socket(ipAddress, port);
-                    ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
-                    ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
+                ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+                ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
 
                 // Enviar o pedido de pesquisa
-                out.writeObject(new SearchRequest(searchTerm));
+                out.writeObject(new SearchRequest(searchTerm, this.ipAddress + ":" + this.port));
                 out.flush();
                 System.out.println("Pedido de pesquisa enviado: " + searchTerm);
 
@@ -145,22 +178,6 @@ public class IscTorrentNode {
                 System.err.println("Erro na pesquisa: " + e.getMessage());
             }
         }).start();
-    }
-
-    public synchronized void addNeighbor(String neighbor) {
-        if (!connectedNodes.contains(neighbor)) {
-            connectedNodes.add(neighbor);
-            System.out.println("Vizinho adicionado: " + neighbor);
-            System.out.println("Lista de vizinhos atualizada: " + connectedNodes);
-        } else {
-            System.out.println("Vizinho já existe: " + neighbor);
-        }
-    }
-    
-
-    // Método para obter a lista de vizinhos
-    public synchronized List<String> getConnectedNodes() {
-        return new ArrayList<>(connectedNodes);
     }
 
     // Conectar a um nó
@@ -215,45 +232,73 @@ public class IscTorrentNode {
         new Thread(() -> {
             int dataIndex = 0;
             boolean fileComplete = false;
-    
+            boolean fileFound = false;
+
             try (FileOutputStream downloadedFile = new FileOutputStream(new File(fileDirectory, fileName))) {
                 while (!fileComplete) {
-                    try (Socket socket = new Socket(ipAddress, port);
-                         ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
-                         ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
-    
-                        FileRequest request = new FileRequest(fileName, dataIndex);
-                        out.writeObject(request);
-                        out.flush();
-    
-                        Object response = in.readObject();
-                        if (response instanceof FileResponse) {
-                            FileResponse fileResponse = (FileResponse) response;
-                            byte[] fileData = fileResponse.getFileData();
-    
-                            if (fileData.length == 0) {
-                                System.out.println("Fim do ficheiro detectado no cliente.");
-                                fileComplete = true;
-                                continue;
+                    for (String neighbor : connectedNodes) { // Iterar sobre os vizinhos
+                        try (Socket socket = new Socket(neighbor.split(":")[0],
+                                Integer.parseInt(neighbor.split(":")[1]));
+                                ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+                                ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
+
+                            if (!fileFound) {
+                                // Enviar um pedido de verificação se o arquivo existe no vizinho
+                                out.writeObject(new SearchRequest(fileName, this.ipAddress + ":" + this.port));
+                                out.flush();
+
+                                Object response = in.readObject();
+                                if (response instanceof SearchResponse) {
+                                    SearchResponse searchResponse = (SearchResponse) response;
+                                    if (searchResponse.getFileNames().contains(fileName)) {
+                                        fileFound = true;
+                                        System.out.println("Arquivo encontrado no vizinho: " + neighbor);
+                                    }
+                                }
                             }
-    
-                            downloadedFile.write(fileData);
-                            System.out.println("Bloco recebido para " + fileName + " (índice: " + dataIndex + "): " 
-                                    + new String(fileData).trim());
-                            dataIndex++;
-                        } else {
-                            throw new IOException("Resposta inesperada do servidor.");
+
+                            // Caso o arquivo esteja no vizinho, enviar o pedido de bloco
+                            if (fileFound) {
+                                FileRequest request = new FileRequest(fileName, dataIndex);
+                                out.writeObject(request);
+                                out.flush();
+
+                                Object response = in.readObject();
+                                if (response instanceof FileResponse) {
+                                    FileResponse fileResponse = (FileResponse) response;
+                                    byte[] fileData = fileResponse.getFileData();
+
+                                    if (fileData.length == 0) {
+                                        System.out.println("Fim do ficheiro detectado no cliente.");
+                                        fileComplete = true;
+                                        break;
+                                    }
+
+                                    downloadedFile.write(fileData);
+                                    System.out.println(
+                                            "Bloco recebido para " + fileName + " (índice: " + dataIndex + "): "
+                                                    + new String(fileData).trim());
+                                    dataIndex++;
+                                }
+                            }
+                        } catch (Exception e) {
+                            System.err.println("Erro ao comunicar com o vizinho " + neighbor + ": " + e.getMessage());
                         }
                     }
+
+                    if (!fileFound) {
+                        JOptionPane.showMessageDialog(null, "Arquivo não encontrado em nenhum nó vizinho.");
+                        break;
+                    }
                 }
-                JOptionPane.showMessageDialog(null, "Ficheiro descarregado com sucesso: " + fileName);
+                if (fileComplete) {
+                    JOptionPane.showMessageDialog(null, "Ficheiro descarregado com sucesso: " + fileName);
+                }
             } catch (Exception e) {
                 e.printStackTrace();
                 JOptionPane.showMessageDialog(null, "Erro ao descarregar o ficheiro: " + e.getMessage());
             }
         }).start();
     }
-    
-    
 
 }
