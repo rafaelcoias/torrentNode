@@ -77,7 +77,7 @@ public void run() {
     }
 
     private byte[] readData(File file, int dataIndex) throws IOException {
-        int dataSize = 1024;  // TODO: Qual o tamanho de ideal dos dados?
+        int dataSize = 10240;  // TODO: testar valores (10240)
         byte[] buffer = new byte[dataSize];
 
         try (var fileInputStream = new java.io.FileInputStream(file)) {

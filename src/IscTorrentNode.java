@@ -17,8 +17,10 @@ public class IscTorrentNode {
         this.port = port;
         this.fileDirectory = fileDirectory;
 
+        // Inicializa a interface gráfica deste nó
         initializeInterface();
 
+        // Inicializa o servidor deste nó
         NodeServer server = new NodeServer(port);
         server.startServer();
     }

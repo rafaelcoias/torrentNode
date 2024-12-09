@@ -3,6 +3,9 @@ import java.util.List;
 
 public abstract class Message implements Serializable {
     
+    // TODO: Separar as classes em ficheiros
+    // Alterar nome das classes como no enunciado 
+
     // Pedido de pesquisa de ficheiros
     public static class SearchRequest extends Message {
         private String searchTerm;
