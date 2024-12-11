@@ -23,15 +23,12 @@ public class NodeServer {
             System.out.println("Servidor iniciado na porta " + port);
             
             // Thread que aceita conexões de clientes
-            // Cria uma nova thread para lidar com cada cliente conectado
             new Thread(() -> {
                 while (!serverSocket.isClosed()) {
                     try {
                         Socket clientSocket = serverSocket.accept();
-                        System.out.println("Novo nó conectado: " + clientSocket.getLocalSocketAddress());
 
-                        // Passa o socket e a pasta ao ClientHandler, que vai lidar com as mensagens do cliente
-                        // ClientHandler lida com pedidos de SEARCH, DOWNLOAD e CONNECT
+                        // Passa o socket e a pasta ao ClientHandler, uma nova Thread, que vai lidar com as mensagens do cliente
                         new Thread(new ClientHandler(clientSocket, fileDirectory, node)).start();
                     } catch (IOException e) {
                         if (!serverSocket.isClosed())
