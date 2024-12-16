@@ -21,28 +21,28 @@ public class ClientHandler implements Runnable {
     public void run() {
         try {
             ObjectOutputStream out = new ObjectOutputStream(clientSocket.getOutputStream());
-            out.flush();
+            out.flush(); // Limpar buffer, sem isto dava bugs
             ObjectInputStream in = new ObjectInputStream(clientSocket.getInputStream());
 
-            // Loop para lidar com mensagens do cliente, fica aberto até a conexão ser fechada
+            // Loop para lidar com mensagens do cliente, fica aberto até a conexão fechar
             while (true) {
                 Object message = in.readObject();
 
-                // Se a mensagem for uma string e começar com "CONNECT", é um pedido de conexão
                 if (message instanceof String && ((String) message).startsWith("CONNECT")) {
                     String neighbor = ((String) message).split(" ")[1];
-                    node.addNeighbor(neighbor);
-                    System.out.println("Novo vizinho adicionado: " + neighbor);
-                    // Avisar o vizinho que a conexão foi bem sucedida
+                    // Ativar ou desativar ligações diretas
+                    // node.addNeighbor(neighbor);
+                    // System.out.println("Novo vizinho adicionado: " + neighbor);
                     out.writeObject("OK CONNECTED");
                     out.flush();
                     continue;
                 }
 
-                if (message instanceof SearchRequest) {
-                    handleSearchRequest((SearchRequest) message, out);
-                } else if (message instanceof FileRequest) {
-                    handleFileRequest((FileRequest) message, out);
+                if (message instanceof WordSearchMessage) {
+                    handleWordSearchMessage((WordSearchMessage) message, out);
+                } else if (message instanceof FileBlockRequestMessage) {
+                    FileBlockRequestMessage req = (FileBlockRequestMessage) message;
+                    handleFileBlockRequest(req, out);
                 } else {
                     System.err.println("Mensagem inválida recebida: " + message);
                 }
@@ -62,178 +62,132 @@ public class ClientHandler implements Runnable {
 
     // Funções de pesquisa
 
-    private void handleSearchRequest(SearchRequest request, ObjectOutputStream out) throws IOException {
+    private void handleWordSearchMessage(WordSearchMessage request, ObjectOutputStream out) throws IOException {
         String searchTerm = request.getSearchTerm();
-        // Procurar ficheiros locais
-        List<String> foundFiles = searchLocalFiles(searchTerm);
-        System.out.println("Ficheiros locais encontrados: " + foundFiles);
+        List<FileSearchResult> localResults = searchLocalFilesForResults(searchTerm);
+        List<FileSearchResult> neighborResults = searchInNeighborsForResults(request, request.getSenderNode());
+        localResults.addAll(neighborResults);
 
-        // Propagar o pedido de pesquisa para os vizinhos
-        List<String> neighborFiles = searchInNeighbors(request, request.getSenderNode());
-        System.out.println("Ficheiros encontrados nos vizinhos: " + neighborFiles);
-
-        // Juntar os resultados locais e os dos vizinhos
-        foundFiles.addAll(neighborFiles);
-
-        // Enviar a resposta de volta
-        SearchResponse response = new SearchResponse(foundFiles);
+        // enviar resposta com resultados
+        WordSearchResponse response = new WordSearchResponse(localResults);
         out.writeObject(response);
         out.flush();
-        System.out.println("Resposta de pesquisa enviada: " + foundFiles);
-
     }
 
-    private List<String> searchLocalFiles(String searchTerm) {
-        List<String> filesFound = new ArrayList<>();
+    private List<FileSearchResult> searchLocalFilesForResults(String searchTerm) {
+        List<FileSearchResult> results = new ArrayList<>();
         File directory = new File(fileDirectory);
 
-        // Verificar se o diretório existe
-        if (!directory.exists() || !directory.isDirectory()) {
-            System.err.println("Diretório não encontrado ou inválido: " + directory.getAbsolutePath());
-            return filesFound;
-        }
+        if (!directory.exists() || !directory.isDirectory())
+            return results;
 
         File[] allFiles = directory.listFiles();
-        if (allFiles != null) {
-            System.out.println("Ficheiros no diretório fornecido:");
-            for (File file : allFiles)
-                System.out.println(" - " + file.getName());
-        } else {
-            System.out.println("Nenhum ficheiro encontrado no diretório fornecido.");
-        }
+        if (allFiles == null)
+            return results;
 
-        // Procurar ficheiros que contenham o termo de pesquisa
         for (File file : allFiles) {
             if (file.isFile() && file.getName().contains(searchTerm)) {
-                filesFound.add(file.getName());
+                try {
+                    String hash = FileManager.computeFileHash(file);
+                    results.add(new FileSearchResult(hash, file.length(), file.getName(),
+                            node.getIpAddress() + ":" + node.getPort()));
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
             }
         }
-
-        System.out.println("Ficheiros encontrados com o termo '" + searchTerm + "': " + filesFound);
-        return filesFound;
+        return results;
     }
 
-    private List<String> searchInNeighbors(SearchRequest request, String senderNode) {
-        System.out.println("Iniciar a pesquisa nos vizinhos. Lista de vizinhos atual: " + node.getConnectedNodes());
-        List<String> allFiles = new ArrayList<>();
+    private List<FileSearchResult> searchInNeighborsForResults(WordSearchMessage request, String senderNode) {
+        List<FileSearchResult> allResults = new ArrayList<>();
 
         for (String neighbor : node.getConnectedNodes()) {
             if (neighbor.equals(senderNode))
                 continue;
-            try {
-                String[] parts = neighbor.split(":");
-                String ip = parts[0];
-                int port = Integer.parseInt(parts[1]);
 
-                try (Socket socket = new Socket(ip, port);
+            String[] parts = neighbor.split(":");
+            String ip = parts[0];
+            int port = Integer.parseInt(parts[1]);
+
+            try (Socket socket = new Socket(ip, port);
                     ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
                     ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
 
-                    // Forward the request with updated senderNode
-                    SearchRequest forwardedRequest = new SearchRequest(request.getSearchTerm(), node.getIpAddress() + ":" + node.getPort());
-                    out.writeObject(forwardedRequest);
-                    out.flush();
-                    System.out.println("Pedido de pesquisa enviado para vizinho: " + neighbor);
+                // Enviar pedido de pesquisa para o vizinho
+                WordSearchMessage forwardedRequest = new WordSearchMessage(request.getSearchTerm(),
+                        node.getIpAddress() + ":" + node.getPort());
+                out.writeObject(forwardedRequest);
+                out.flush();
 
-                    Object response = in.readObject();
-                    if (response instanceof SearchResponse) {
-                        SearchResponse searchResponse = (SearchResponse) response;
-                        allFiles.addAll(searchResponse.getFileNames());
-                        System.out.println(
-                                "Resposta recebida do vizinho " + neighbor + ": " + searchResponse.getFileNames());
-                    }
+                Object response = in.readObject();
+                if (response instanceof WordSearchResponse) {
+                    WordSearchResponse wsResponse = (WordSearchResponse) response;
+                    allResults.addAll(wsResponse.getResults());
                 }
             } catch (Exception e) {
                 System.err.println("Erro ao comunicar com o vizinho " + neighbor + ": " + e.getMessage());
             }
         }
-        return allFiles;
+        return allResults;
     }
 
     // Funções de download
 
-    private void handleFileRequest(FileRequest request, ObjectOutputStream out) throws IOException {
-        String fileName = request.getFileName();
-        int dataIndex = request.getDataIndex();
-        File file = new File(fileDirectory, fileName);
-
-        // Se o ficheiro existir localmente, processa normalmente
-        if (file.exists() && file.isFile()) {
-            byte[] fileData = readData(file, dataIndex);
-
-            if (fileData.length == 0) {
-                System.out.println("Fim do ficheiro detectado no servidor para " + fileName);
-            }
-
-            FileResponse response = new FileResponse(fileData, dataIndex);
-            out.writeObject(response);
+    private void handleFileBlockRequest(FileBlockRequestMessage req, ObjectOutputStream out) throws IOException {
+        System.out.println("Pedido de bloco recebido");
+        File file = node.getFileManager().getFileByHash(req.getFileHash());
+        if (file == null) {
+            System.out.println("Ficheiro não encontrado localmente.");
+            out.writeObject(new FileBlockAnswerMessage(req.getFileHash(), req.getOffset(), new byte[0]));
             out.flush();
-        } else {
-            System.out.println("Ficheiro " + fileName + " não encontrado localmente. Encaminhando para os vizinhos...");
-            forwardRequestToNeighbors(request, out);
+            return;
         }
+
+        byte[] data = readFileBlock(file, req.getOffset(), req.getLength());
+        System.out.println("A enviar bloco de tamanho " + data.length + " bytes");
+        FileBlockAnswerMessage ans = new FileBlockAnswerMessage(req.getFileHash(), req.getOffset(), data);
+        out.writeObject(ans);
+        out.flush();
     }
 
-    private void forwardRequestToNeighbors(FileRequest request, ObjectOutputStream clientOut) {
-        for (String neighbor : node.getConnectedNodes()) {
-            try {
-                String[] parts = neighbor.split(":");
-                String neighborIp = parts[0];
-                int neighborPort = Integer.parseInt(parts[1]);
-
-                try (Socket socket = new Socket(neighborIp, neighborPort);
-                    ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
-                    ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
-
-                    // Enviar o pedido de ficheiro para o vizinho
-                    out.writeObject(request);
-                    out.flush();
-
-                    // Receber a resposta do vizinho
-                    Object response = in.readObject();
-                    if (response instanceof FileResponse) {
-                        clientOut.writeObject(response);
-                        clientOut.flush();
-                        return;
-                    }
-                }
-            } catch (Exception e) {
-                System.err.println("Erro ao encaminhar pedido para vizinho " + neighbor + ": " + e.getMessage());
-            }
-        }
-
-        // Se nenhum vizinho tiver o ficheiro, informa o cliente
-        try {
-            clientOut.writeObject(new FileResponse(new byte[0], request.getDataIndex()));
-            clientOut.flush();
-        } catch (IOException e) {
-            System.err.println("Erro ao informar cliente sobre falta do ficheiro: " + e.getMessage());
-        }
-    }
-
-    private byte[] readData(File file, int dataIndex) throws IOException {
-        // Tamanho padrão de bloco a rever com o prof.
-        int dataSize = 10240; 
-        byte[] buffer = new byte[dataSize];
-
-        try (FileInputStream fileInputStream = new FileInputStream(file)) {
-            fileInputStream.skip((long) dataIndex * dataSize);
-
-            int bytesRead = fileInputStream.read(buffer);
-
-            if (bytesRead == -1) {
-                System.out.println("Fim do ficheiro atingido.");
-                return new byte[0];
-            }
-
-            // Caso o último bloco seja menor que o tamanho padrão - sem isto dava erro
-            if (bytesRead < dataSize) {
-                byte[] lastData = new byte[bytesRead];
-                System.arraycopy(buffer, 0, lastData, 0, bytesRead);
-                return lastData;
+    private byte[] readFileBlock(File file, long offset, int length) throws IOException {
+        byte[] buffer = new byte[length];
+        try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+            raf.seek(offset);
+            int bytesRead = raf.read(buffer);
+            if (bytesRead < length) {
+                byte[] smaller = new byte[bytesRead];
+                System.arraycopy(buffer, 0, smaller, 0, bytesRead);
+                return smaller;
             }
         }
         return buffer;
     }
+
+    // private byte[] readData(File file, int dataIndex) throws IOException {
+    //     // Tamanho padrão de bloco a rever com o prof.
+    //     int dataSize = 10240; 
+    //     byte[] buffer = new byte[dataSize];
+
+    //     try (FileInputStream fileInputStream = new FileInputStream(file)) {
+    //         fileInputStream.skip((long) dataIndex * dataSize);
+
+    //         int bytesRead = fileInputStream.read(buffer);
+
+    //         if (bytesRead == -1) {
+    //             System.out.println("Fim do ficheiro atingido.");
+    //             return new byte[0];
+    //         }
+
+    //         // Caso o último bloco seja menor que o tamanho padrão - sem isto dava erro
+    //         if (bytesRead < dataSize) {
+    //             byte[] lastData = new byte[bytesRead];
+    //             System.arraycopy(buffer, 0, lastData, 0, bytesRead);
+    //             return lastData;
+    //         }
+    //     }
+    //     return buffer;
+    // }
 
 }

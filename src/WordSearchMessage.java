@@ -1,11 +1,11 @@
 import java.io.Serializable;
 
-public class SearchRequest implements Serializable {
+public class WordSearchMessage implements Serializable {
     private static final long serialVersionUID = 1L;
     private String searchTerm;
     private String senderNode; 
 
-    public SearchRequest(String searchTerm, String senderNode) {
+    public WordSearchMessage(String searchTerm, String senderNode) {
         this.searchTerm = searchTerm;
         this.senderNode = senderNode;
     }

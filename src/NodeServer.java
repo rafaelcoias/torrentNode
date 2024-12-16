@@ -2,6 +2,8 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class NodeServer {
     // Atributos
@@ -21,15 +23,15 @@ public class NodeServer {
         try {
             serverSocket = new ServerSocket(port, 50, InetAddress.getByName(ipAddress));
             System.out.println("Servidor iniciado na porta " + port);
+
+            ExecutorService pool = Executors.newFixedThreadPool(5);
             
             // Thread que aceita conexões de clientes
             new Thread(() -> {
                 while (!serverSocket.isClosed()) {
                     try {
                         Socket clientSocket = serverSocket.accept();
-
-                        // Passa o socket e a pasta ao ClientHandler, uma nova Thread, que vai lidar com as mensagens do cliente
-                        new Thread(new ClientHandler(clientSocket, fileDirectory, node)).start();
+                        pool.submit(new ClientHandler(clientSocket, fileDirectory, node));
                     } catch (IOException e) {
                         if (!serverSocket.isClosed())
                             System.err.println("Erro ao aceitar conexão: " + e.getMessage());
